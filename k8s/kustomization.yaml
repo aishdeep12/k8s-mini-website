@@ -11,4 +11,4 @@ images:
   - name: mini-web-image
     # The pipeline rewrites these two lines on every successful build of main.
     newName: ghcr.io/aishdeep12/k8s-mini-website
-    newTag: latest
+    newTag: d077301
