@@ -1,0 +1,10 @@
+.git
+.github
+k8s
+docker-compose.yaml
+argocd
+tests
+**/__pycache__
+**/*.pyc
+.pytest_cache
+*.md

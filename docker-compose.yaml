@@ -1,0 +1,22 @@
+# Run the whole thing locally without Kubernetes:
+#   docker compose up --build --scale worker=2
+# Then open http://localhost:5000
+services:
+  redis:
+    image: redis:7-alpine
+
+  web:
+    build: .
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      POD_NAME: web
+    ports:
+      - "5000:8080"
+    depends_on: [redis]
+
+  worker:
+    build: .
+    command: ["dramatiq", "tasks", "--processes", "1", "--threads", "2"]
+    environment:
+      REDIS_URL: redis://redis:6379/0
+    depends_on: [redis]

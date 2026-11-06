@@ -1,0 +1,149 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # 1) CI: unit tests
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install Tesseract (for the real-OCR test)
+        run: sudo apt-get update -q && sudo apt-get install -y -q tesseract-ocr
+      - run: pip install -r app/requirements.txt -r requirements-dev.txt
+      - run: pytest -q
+
+  # 2) Build the image, deploy it to a throwaway kind cluster, smoke-test, then push
+  build-and-smoke-test:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.vars.outputs.image }}
+      tag: ${{ steps.vars.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Work out image name and tag
+        id: vars
+        run: |
+          echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+          echo "tag=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Build Docker image
+        env:
+          IMAGE: ${{ steps.vars.outputs.image }}
+          TAG: ${{ steps.vars.outputs.tag }}
+        run: docker build --build-arg APP_VERSION="$TAG" -t "$IMAGE:$TAG" .
+
+      - name: Create a kind cluster
+        run: |
+          if ! command -v kind >/dev/null; then
+            curl -sLo kind https://kind.sigs.k8s.io/dl/v0.27.0/kind-linux-amd64
+            chmod +x kind && sudo mv kind /usr/local/bin/kind
+          fi
+          kind create cluster --name ci --wait 120s
+          kubectl get nodes
+
+      - name: Load image into kind
+        env:
+          IMAGE: ${{ steps.vars.outputs.image }}
+          TAG: ${{ steps.vars.outputs.tag }}
+        run: kind load docker-image "$IMAGE:$TAG" --name ci
+
+      - name: Deploy manifests to kind
+        env:
+          IMAGE: ${{ steps.vars.outputs.image }}
+          TAG: ${{ steps.vars.outputs.tag }}
+        run: |
+          sed -i "s|newName: .*|newName: $IMAGE|; s|newTag: .*|newTag: $TAG|" k8s/kustomization.yaml
+          kubectl apply -k k8s/
+          kubectl -n mini-web rollout status deployment/redis --timeout=180s
+          kubectl -n mini-web rollout status deployment/mini-web --timeout=180s
+          kubectl -n mini-web rollout status deployment/ocr-worker --timeout=180s
+          kubectl -n mini-web get pods -o wide
+
+      - name: Smoke test
+        run: |
+          kubectl -n mini-web port-forward svc/mini-web 8080:80 >/dev/null 2>&1 &
+          for i in $(seq 1 15); do
+            if curl -fsS http://localhost:8080/healthz; then break; fi
+            sleep 2
+          done
+          curl -fsS http://localhost:8080/api/info
+          curl -fsS http://localhost:8080/ | grep -q "Served by pod"
+
+      - name: Smoke test OCR (web pod → Redis queue → OCR worker pod)
+        run: |
+          JOB=$(curl -fsS -F "file=@tests/fixtures/hello.png" http://localhost:8080/api/ocr)
+          echo "$JOB"
+          ID=$(echo "$JOB" | python3 -c "import sys, json; print(json.load(sys.stdin)['job_id'])")
+          for i in $(seq 1 30); do
+            STATUS=$(curl -fsS "http://localhost:8080/api/jobs/$ID")
+            if echo "$STATUS" | grep -q '"status":"done"'; then break; fi
+            sleep 2
+          done
+          echo "$STATUS"
+          echo "$STATUS" | grep -q '"status":"done"'
+          echo "$STATUS" | grep -qi "kubernetes"
+
+      - name: Debug info on failure
+        if: failure()
+        run: |
+          kubectl -n mini-web get all || true
+          kubectl -n mini-web describe pods || true
+          kubectl -n mini-web logs -l app=mini-web --tail=50 || true
+          kubectl -n mini-web logs -l app=ocr-worker --tail=50 || true
+
+      - name: Push image to GitHub Container Registry
+        if: github.event_name != 'pull_request'
+        env:
+          IMAGE: ${{ steps.vars.outputs.image }}
+          TAG: ${{ steps.vars.outputs.tag }}
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker push "$IMAGE:$TAG"
+
+  # 3) CD: record the new tag in Git; Argo CD sees the commit and deploys it
+  update-manifest:
+    needs: build-and-smoke-test
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: update-manifest
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bump image tag in k8s/kustomization.yaml
+        env:
+          IMAGE: ${{ needs.build-and-smoke-test.outputs.image }}
+          TAG: ${{ needs.build-and-smoke-test.outputs.tag }}
+        run: |
+          sed -i "s|newName: .*|newName: $IMAGE|; s|newTag: .*|newTag: $TAG|" k8s/kustomization.yaml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add k8s/kustomization.yaml
+          if git diff --cached --quiet; then
+            echo "No change"; exit 0
+          fi
+          git commit -m "deploy: mini-web $TAG [skip ci]"
+          git pull --rebase origin main
+          git push origin HEAD:main

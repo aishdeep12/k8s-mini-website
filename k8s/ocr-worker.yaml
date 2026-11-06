@@ -1,0 +1,42 @@
+# OCR worker pods: same image as the website, different command.
+# They have no Service. Nobody sends them HTTP requests; they pull jobs from the Redis queue.
+# Scale them on their own:  kubectl -n mini-web scale deploy/ocr-worker --replicas=4
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ocr-worker
+  labels:
+    app: ocr-worker
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: ocr-worker
+  template:
+    metadata:
+      labels:
+        app: ocr-worker
+    spec:
+      terminationGracePeriodSeconds: 60     # give a running OCR job time to finish on shutdown
+      containers:
+        - name: worker
+          image: mini-web-image             # same placeholder as the web Deployment; kustomize sets the tag
+          imagePullPolicy: IfNotPresent
+          command: ["dramatiq", "tasks", "--processes", "1", "--threads", "2"]
+          env:
+            - name: REDIS_URL
+              value: redis://redis:6379/0
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          resources:
+            requests:                       # OCR is heavier than serving web pages
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 768Mi
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false

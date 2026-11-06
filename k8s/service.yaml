@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: mini-web
+spec:
+  type: NodePort                  # on Docker Desktop this is reachable at http://localhost:30080
+  selector:
+    app: mini-web                 # load-balances across every pod with this label
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      nodePort: 30080

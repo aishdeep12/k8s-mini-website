@@ -1,0 +1,22 @@
+# Tells Argo CD (running in your cluster) to keep the cluster in sync with the k8s/ folder of your repo.
+# Change repoURL if your GitHub username or repo name is different.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: mini-web
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/aishdeep12/k8s-mini-website.git
+    targetRevision: main
+    path: k8s
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: mini-web
+  syncPolicy:
+    automated:
+      prune: true      # delete things you remove from Git
+      selfHeal: true   # undo manual changes made with kubectl
+    syncOptions:
+      - CreateNamespace=true

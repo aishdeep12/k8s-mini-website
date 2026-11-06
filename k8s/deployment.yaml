@@ -1,0 +1,61 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mini-web
+  labels:
+    app: mini-web
+spec:
+  replicas: 3                     # 3 pods running the same app
+  selector:
+    matchLabels:
+      app: mini-web
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0           # never drop below 3 ready pods during a deploy
+      maxSurge: 1
+  template:                       # <- the Pod template
+    metadata:
+      labels:
+        app: mini-web
+    spec:
+      containers:
+        - name: web
+          image: mini-web-image   # placeholder; kustomization.yaml sets the real image + tag
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: REDIS_URL               # the Redis Service inside the cluster
+              value: redis://redis:6379/0
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          readinessProbe:         # only send traffic once this passes
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:          # restart the container if this keeps failing
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false

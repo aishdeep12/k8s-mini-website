@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mini Website on Kubernetes</title>
+  <style>
+    :root { --bg:#0c1626; --card:#16243a; --line:#2a3b58; --blue:#326ce5; --teal:#2ec4b6; --amber:#f5a524;
+            --red:#eb5757; --text:#eef2f8; --muted:#94a3bb; }
+    * { box-sizing: border-box; }
+    body { margin:0; min-height:100vh; background:var(--bg); color:var(--text);
+           font-family: system-ui, -apple-system, "Segoe UI", sans-serif; padding:40px 16px; }
+    main { max-width:720px; margin:0 auto; display:grid; gap:24px; }
+    .card { background:var(--card); border:1px solid var(--line); border-radius:20px; padding:32px; }
+    h1 { margin:0 0 8px; font-size:2rem; }
+    h2 { margin:0 0 6px; font-size:1.3rem; }
+    p.sub { margin:0 0 24px; color:var(--muted); }
+    dl { display:grid; grid-template-columns:auto 1fr; gap:10px 20px; margin:0; }
+    dt { color:var(--muted); }
+    dd { margin:0; font-family: ui-monospace, Consolas, monospace; color:var(--teal); word-break:break-all; }
+    .tag { display:inline-block; background:var(--blue); padding:4px 12px; border-radius:999px; font-size:.85rem; margin-bottom:18px; }
+    form { display:flex; gap:12px; flex-wrap:wrap; align-items:center; }
+    input[type=file] { color:var(--muted); max-width:100%; }
+    button { background:var(--teal); color:#062a26; border:0; border-radius:10px; padding:10px 18px;
+             font-weight:600; cursor:pointer; }
+    button:disabled { opacity:.5; cursor:default; }
+    .flow { display:flex; flex-wrap:wrap; gap:8px; margin:20px 0 0; }
+    .step { padding:6px 12px; border-radius:999px; border:1px solid var(--line); color:var(--muted); font-size:.85rem; }
+    .step.on { border-color:var(--teal); color:var(--teal); }
+    .step.fail { border-color:var(--red); color:var(--red); }
+    #result { margin-top:20px; display:none; }
+    pre { background:#08101c; border:1px solid var(--line); border-radius:12px; padding:16px; white-space:pre-wrap;
+          font-family: ui-monospace, Consolas, monospace; margin:16px 0 0; max-height:320px; overflow:auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="card">
+      <span class="tag">GitHub Actions → GHCR → Argo CD → Kubernetes</span>
+      <!-- Change this headline, git push, and watch the new version roll out. -->
+      <h1>Hello from my mini website! 🚀</h1>
+      <p class="sub">Every push to main is tested, built, smoke-tested on a throwaway cluster, and deployed.</p>
+      <dl>
+        <dt>Version</dt><dd>{{ version }}</dd>
+        <dt>Served by pod</dt><dd>{{ pod }}</dd>
+        <dt>Running on node</dt><dd>{{ node }}</dd>
+      </dl>
+    </section>
+
+    <section class="card">
+      <h2>OCR an image</h2>
+      <p class="sub">A web pod queues the job in Redis. A separate OCR worker pod picks it up and reads the text.</p>
+      <form id="ocr-form">
+        <input type="file" id="file" name="file" accept="image/*" required>
+        <button id="go" type="submit">Extract text</button>
+      </form>
+      <div class="flow">
+        <span class="step" id="s-queued">1 · queued by web pod</span>
+        <span class="step" id="s-running">2 · picked up by OCR worker</span>
+        <span class="step" id="s-done">3 · done</span>
+      </div>
+      <div id="result">
+        <dl>
+          <dt>Job id</dt><dd id="r-id"></dd>
+          <dt>Queued by (web pod)</dt><dd id="r-api"></dd>
+          <dt>Processed by (OCR pod)</dt><dd id="r-worker">waiting…</dd>
+          <dt>OCR time</dt><dd id="r-secs">–</dd>
+        </dl>
+        <pre id="r-text"></pre>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const steps = ["queued", "running", "done"];
+
+    function showStep(status) {
+      const idx = steps.indexOf(status === "failed" ? "done" : status);
+      steps.forEach((s, i) => {
+        const el = $("s-" + s);
+        el.className = "step" + (i <= idx ? (status === "failed" && s === "done" ? " fail" : " on") : "");
+      });
+    }
+
+    $("ocr-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const file = $("file").files[0];
+      if (!file) return;
+      $("go").disabled = true;
+      $("result").style.display = "block";
+      $("r-text").textContent = "";
+      $("r-worker").textContent = "waiting…";
+      $("r-secs").textContent = "–";
+
+      const body = new FormData();
+      body.append("file", file);
+      const res = await fetch("/api/ocr", { method: "POST", body });
+      const job = await res.json();
+      if (!res.ok) { $("r-text").textContent = job.error; $("go").disabled = false; return; }
+
+      $("r-id").textContent = job.job_id;
+      $("r-api").textContent = job.api_pod;
+      showStep("queued");
+
+      // Poll the job status. Each poll may be answered by a different web pod. They all read Redis.
+      const timer = setInterval(async () => {
+        const s = await (await fetch("/api/jobs/" + job.job_id)).json();
+        showStep(s.status);
+        if (s.worker_pod) $("r-worker").textContent = s.worker_pod;
+        if (s.status === "done" || s.status === "failed") {
+          clearInterval(timer);
+          $("go").disabled = false;
+          $("r-secs").textContent = s.seconds ? s.seconds + " s" : "–";
+          $("r-text").textContent = s.status === "done" ? (s.text || "(no text found)") : "Failed: " + s.error;
+        }
+      }, 1000);
+    });
+  </script>
+</body>
+</html>
